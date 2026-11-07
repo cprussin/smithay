@@ -621,9 +621,6 @@ impl<D: SeatHandler + 'static> TouchInternal<D> {
 
     fn cancel(&mut self, data: &mut D, seat: &Seat<D>, seq: Serial) {
         for state in self.focus.values_mut() {
-            if state.current.map(|c| c >= state.pending).unwrap_or(false) {
-                continue;
-            }
             state.current = Some(seq);
             if let Some((focus, _)) = state.focus.take() {
                 focus.cancel(seat, data, seq);
@@ -689,5 +686,101 @@ impl<D: SeatHandler + 'static> TouchInternal<D> {
             // the grab has not been ended nor replaced, put it back in place
             self.grab = grab;
         }
+    }
+}
+
+#[cfg(all(test, feature = "wayland_frontend"))]
+mod tests {
+    use super::*;
+    use crate::input::SeatState;
+    use crate::utils::IsAlive;
+    use wayland_server::protocol::wl_surface::WlSurface;
+
+    struct State {
+        seats: SeatState<Self>,
+        events: Vec<&'static str>,
+    }
+
+    impl SeatHandler for State {
+        type KeyboardFocus = WlSurface;
+        type PointerFocus = WlSurface;
+        type TouchFocus = Target;
+
+        fn seat_state(&mut self) -> &mut SeatState<Self> {
+            &mut self.seats
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct Target;
+
+    impl IsAlive for Target {
+        fn alive(&self) -> bool {
+            true
+        }
+    }
+
+    impl TouchTarget<State> for Target {
+        fn down(&self, _: &Seat<State>, data: &mut State, _: &DownEvent, _: Serial) {
+            data.events.push("down");
+        }
+        fn up(&self, _: &Seat<State>, data: &mut State, _: &UpEvent, _: Serial) {
+            data.events.push("up");
+        }
+        fn motion(&self, _: &Seat<State>, data: &mut State, _: &MotionEvent, _: Serial) {
+            data.events.push("motion");
+        }
+        fn frame(&self, _: &Seat<State>, data: &mut State, _: Serial) {
+            data.events.push("frame");
+        }
+        fn cancel(&self, _: &Seat<State>, data: &mut State, _: Serial) {
+            data.events.push("cancel");
+        }
+        fn shape(&self, _: &Seat<State>, _: &mut State, _: &ShapeEvent, _: Serial) {}
+        fn orientation(&self, _: &Seat<State>, _: &mut State, _: &OrientationEvent, _: Serial) {}
+    }
+
+    #[test]
+    fn cancel_retires_contacts_after_a_completed_frame() {
+        let mut state = State {
+            seats: SeatState::new(),
+            events: Vec::new(),
+        };
+        let mut seat = state.seats.new_seat("test");
+        let touch = seat.add_touch();
+        let slot = Some(7).into();
+        touch.down(
+            &mut state,
+            Some((Target, (0.0, 0.0).into())),
+            &DownEvent {
+                slot,
+                location: (12.5, 32.25).into(),
+                serial: 1.into(),
+                time: 1000,
+            },
+        );
+        touch.frame(&mut state);
+        touch.cancel(&mut state);
+        assert_eq!(state.events, ["down", "frame", "cancel"]);
+        touch.motion(
+            &mut state,
+            Some((Target, (0.0, 0.0).into())),
+            &MotionEvent {
+                slot,
+                location: (20.0, 40.0).into(),
+                time: 2000,
+            },
+        );
+        touch.up(
+            &mut state,
+            &UpEvent {
+                slot,
+                serial: 2.into(),
+                time: 3000,
+            },
+        );
+        touch.frame(&mut state);
+        touch.cancel(&mut state);
+        assert_eq!(state.events, ["down", "frame", "cancel"]);
     }
 }
