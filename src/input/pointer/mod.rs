@@ -145,10 +145,20 @@ where
 
 impl<D: SeatHandler + 'static> PointerHandle<D> {
     pub(crate) fn new() -> PointerHandle<D> {
+        Self::new_with_objects(
+            #[cfg(feature = "wayland_frontend")]
+            crate::wayland::seat::pointer::WlPointerHandle::default(),
+        )
+    }
+
+    /// [`PointerHandle::new`], sending its events through `wl_pointer`'s objects.
+    pub(crate) fn new_with_objects(
+        #[cfg(feature = "wayland_frontend")] wl_pointer: crate::wayland::seat::pointer::WlPointerHandle,
+    ) -> PointerHandle<D> {
         PointerHandle {
             inner: Arc::new(Mutex::new(PointerInternal::new())),
             #[cfg(feature = "wayland_frontend")]
-            wl_pointer: Arc::new(crate::wayland::seat::pointer::WlPointerHandle::default()),
+            wl_pointer: Arc::new(wl_pointer),
             #[cfg(feature = "wayland_frontend")]
             wp_pointer_gestures: Arc::new(
                 crate::wayland::pointer_gestures::WpPointerGesturePointerHandle::default(),

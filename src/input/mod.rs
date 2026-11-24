@@ -335,6 +335,12 @@ impl<D: SeatHandler> SeatState<D> {
 
         Seat { arc }
     }
+
+    /// Forget `seat`, made with [`SeatState::new_seat`] and no global, once
+    /// the compositor is done with it.
+    pub fn remove_seat(&mut self, seat: &Seat<D>) {
+        self.seats.retain(|kept| kept != seat);
+    }
 }
 
 impl<D: SeatHandler + 'static> Seat<D> {
@@ -439,6 +445,22 @@ impl<D: SeatHandler + 'static> Seat<D> {
         inner.pointer = Some(pointer.clone());
         #[cfg(feature = "wayland_frontend")]
         inner.send_all_caps();
+        pointer
+    }
+
+    /// Adds a pointer that sends its events through the `wl_pointer` objects
+    /// clients made from `other`'s seat, for a seat without a global.
+    ///
+    /// Each client still sees one seat. The compositor must keep the two
+    /// pointers from focusing surfaces of the same client at once, or that
+    /// client gets an `enter` for one surface while it is in another.
+    #[cfg(feature = "wayland_frontend")]
+    #[instrument(parent = &self.arc.span, skip(self, other))]
+    pub fn add_pointer_sharing_objects(&mut self, other: &PointerHandle<D>) -> PointerHandle<D> {
+        let pointer = PointerHandle::new_with_objects(
+            crate::wayland::seat::pointer::WlPointerHandle::sharing_objects_with(&other.wl_pointer),
+        );
+        self.arc.inner.lock().unwrap().pointer = Some(pointer.clone());
         pointer
     }
 
@@ -576,6 +598,32 @@ impl<D: SeatHandler + 'static> Seat<D> {
         inner.keyboard = Some(keyboard.clone());
         #[cfg(feature = "wayland_frontend")]
         inner.send_all_caps();
+        Ok(keyboard)
+    }
+
+    /// Adds a keyboard that sends its events through the `wl_keyboard`
+    /// objects clients made from `other`'s seat, for a seat without a global.
+    ///
+    /// Each client still sees one seat and one keymap, so give it the same
+    /// keymap as `other`, and change both together: only `other` sends its
+    /// keymap to clients. The compositor must keep the two keyboards from
+    /// focusing surfaces of the same client at once.
+    #[cfg(feature = "wayland_frontend")]
+    #[instrument(parent = &self.arc.span, skip(self, other))]
+    pub fn add_keyboard_sharing_objects(
+        &mut self,
+        xkb_config: keyboard::XkbConfig<'_>,
+        repeat_delay: i32,
+        repeat_rate: i32,
+        other: &KeyboardHandle<D>,
+    ) -> Result<KeyboardHandle<D>, KeyboardError> {
+        let keyboard = self::keyboard::KeyboardHandle::new_with_objects(
+            xkb_config,
+            repeat_delay,
+            repeat_rate,
+            Some(other.arc.known_kbds.clone()),
+        )?;
+        self.arc.inner.lock().unwrap().keyboard = Some(keyboard.clone());
         Ok(keyboard)
     }
 

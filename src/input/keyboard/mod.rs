@@ -350,17 +350,26 @@ pub enum Error {
     IoError(io::Error),
 }
 
+/// The `wl_keyboard` objects a keyboard sends its events through, shared by
+/// keyboards made with [`crate::input::Seat::add_keyboard_sharing_objects`].
+#[cfg(feature = "wayland_frontend")]
+pub(crate) type KnownKeyboards = Arc<Mutex<Vec<Weak<wayland_server::protocol::wl_keyboard::WlKeyboard>>>>;
+
 pub(crate) struct KbdRc<D: SeatHandler> {
     pub(crate) internal: Mutex<KbdInternal<D>>,
     #[cfg(feature = "wayland_frontend")]
     pub(crate) keymap: Mutex<KeymapFile>,
     #[cfg(feature = "wayland_frontend")]
-    pub(crate) known_kbds: Mutex<Vec<Weak<wayland_server::protocol::wl_keyboard::WlKeyboard>>>,
+    pub(crate) known_kbds: KnownKeyboards,
     #[cfg(feature = "wayland_frontend")]
     pub(crate) last_enter: Mutex<Option<Serial>>,
     pub(crate) span: tracing::Span,
     #[cfg(feature = "wayland_frontend")]
     pub(crate) active_keymap: RwLock<KeymapFileId>,
+    /// Whether it sends its keymap to `known_kbds`. Not when it borrows
+    /// another keyboard's: their owner sends the keymap they share.
+    #[cfg(feature = "wayland_frontend")]
+    pub(crate) sends_keymaps: bool,
 }
 
 #[cfg(not(feature = "wayland_frontend"))]
@@ -666,6 +675,24 @@ impl<D: SeatHandler> ::std::cmp::PartialEq for KeyboardHandle<D> {
 impl<D: SeatHandler + 'static> KeyboardHandle<D> {
     /// Create a keyboard handler from a set of RMLVO rules
     pub(crate) fn new(xkb_config: XkbConfig<'_>, repeat_delay: i32, repeat_rate: i32) -> Result<Self, Error> {
+        Self::new_with_objects(
+            xkb_config,
+            repeat_delay,
+            repeat_rate,
+            #[cfg(feature = "wayland_frontend")]
+            None,
+        )
+    }
+
+    /// [`KeyboardHandle::new`], sending its events through `borrowed`, when
+    /// given, the objects of another keyboard. Such a keyboard never sends its
+    /// keymap: the keyboard that owns the objects does.
+    pub(crate) fn new_with_objects(
+        xkb_config: XkbConfig<'_>,
+        repeat_delay: i32,
+        repeat_rate: i32,
+        #[cfg(feature = "wayland_frontend")] borrowed: Option<KnownKeyboards>,
+    ) -> Result<Self, Error> {
         let span = info_span!("input_keyboard");
         let _guard = span.enter();
 
@@ -692,7 +719,9 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
                 keymap: Mutex::new(keymap_file),
                 internal: Mutex::new(internal),
                 #[cfg(feature = "wayland_frontend")]
-                known_kbds: Mutex::new(Vec::new()),
+                sends_keymaps: borrowed.is_none(),
+                #[cfg(feature = "wayland_frontend")]
+                known_kbds: borrowed.unwrap_or_default(),
                 #[cfg(feature = "wayland_frontend")]
                 last_enter: Mutex::new(None),
                 #[cfg(feature = "wayland_frontend")]
@@ -740,9 +769,14 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
         }
         *self.arc.active_keymap.write().unwrap() = new_id;
 
-        // Update keymap for every wl_keyboard.
+        // Update keymap for every wl_keyboard it owns.
         let known_kbds = &self.arc.known_kbds;
-        for kbd in &*known_kbds.lock().unwrap() {
+        let owned = if self.arc.sends_keymaps {
+            known_kbds.lock().unwrap().clone()
+        } else {
+            Vec::new()
+        };
+        for kbd in &owned {
             let Ok(kbd) = kbd.upgrade() else {
                 continue;
             };
@@ -1146,7 +1180,7 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
         guard.repeat_delay = delay;
         guard.repeat_rate = rate;
         #[cfg(feature = "wayland_frontend")]
-        for kbd in &*self.arc.known_kbds.lock().unwrap() {
+        for kbd in self.arc.known_kbds.lock().unwrap().iter().filter(|_| self.arc.sends_keymaps) {
             let Ok(kbd) = kbd.upgrade() else {
                 continue;
             };

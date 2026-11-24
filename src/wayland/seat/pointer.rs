@@ -59,10 +59,19 @@ impl<D: SeatHandler + 'static> PointerHandle<D> {
 #[derive(Debug, Default)]
 pub(crate) struct WlPointerHandle {
     pub(crate) last_enter: Mutex<Option<Serial>>,
-    known_pointers: Mutex<Vec<Weak<WlPointer>>>,
+    known_pointers: Arc<Mutex<Vec<Weak<WlPointer>>>>,
 }
 
 impl WlPointerHandle {
+    /// A handle sending its events through the `wl_pointer` objects `other`
+    /// sends through.
+    pub(crate) fn sharing_objects_with(other: &WlPointerHandle) -> Self {
+        Self {
+            last_enter: Mutex::new(None),
+            known_pointers: other.known_pointers.clone(),
+        }
+    }
+
     pub(super) fn new_pointer(&self, pointer: WlPointer) {
         self.known_pointers.lock().unwrap().push(pointer.downgrade());
     }
