@@ -2,6 +2,9 @@ use wayland_protocols_wlr::data_control::v1::server::zwlr_data_control_device_v1
 use wayland_server::protocol::wl_data_device::WlDataDevice;
 use wayland_server::{Client, DisplayHandle, Resource};
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use crate::utils::IsAlive;
 
 use super::device::SelectionDevice;
@@ -12,7 +15,11 @@ use super::{SelectionHandler, SelectionTarget};
 ///
 /// The data is shared across primary, data device, and data control selections.
 pub(crate) struct SeatData<U: Clone + Sync + Send + 'static> {
-    known_devices: Vec<SelectionDevice>,
+    known_devices: Rc<RefCell<Vec<SelectionDevice>>>,
+    /// Another seat's devices this seat also offers its selections through,
+    /// for a seat without a global. Only `wl_data_device` and primary
+    /// selection devices: data control devices watch their own seat.
+    borrowed_devices: Option<Rc<RefCell<Vec<SelectionDevice>>>>,
     clipboard_selection: Option<OfferReplySource<U>>,
     clipboard_selection_focus: Option<Client>,
     primary_selection: Option<OfferReplySource<U>>,
@@ -26,20 +33,52 @@ impl<U: Clone + Send + Sync + 'static> SeatData<U> {
     }
 
     pub fn retain_devices<F: FnMut(&SelectionDevice) -> bool>(&mut self, retain: F) {
-        self.known_devices.retain(retain);
+        self.known_devices.borrow_mut().retain(retain);
     }
 
     /// Register a new [SelectionDevice] into [SeatData].
     pub fn add_device(&mut self, device: SelectionDevice) {
-        self.known_devices.push(device);
+        self.known_devices.borrow_mut().push(device);
+    }
+
+    /// Offer this seat's selections through `owner`'s `wl_data_device` and
+    /// primary selection devices too, as well as its own.
+    pub fn borrow_devices_of(&mut self, owner: &SeatData<U>) {
+        self.borrowed_devices = Some(owner.known_devices.clone());
     }
 
     /// Get the iterator over [`WlDataDevice`]. Mostly used for the drag and drop handling.
-    pub fn known_data_devices(&self) -> impl Iterator<Item = &WlDataDevice> {
-        self.known_devices.iter().filter_map(|device| match device {
-            SelectionDevice::DataDevice(device) => Some(device),
-            _ => None,
-        })
+    pub fn known_data_devices(&self) -> impl Iterator<Item = WlDataDevice> {
+        self.known_devices
+            .borrow()
+            .iter()
+            .filter_map(|device| match device {
+                SelectionDevice::DataDevice(device) => Some(device.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    /// This seat's devices, then the ones it borrows that it may offer
+    /// selections through.
+    fn devices(&self) -> Vec<SelectionDevice> {
+        let mut devices = self.known_devices.borrow().clone();
+        if let Some(borrowed) = self.borrowed_devices.as_ref() {
+            devices.extend(
+                borrowed
+                    .borrow()
+                    .iter()
+                    .filter(|device| {
+                        matches!(
+                            device,
+                            SelectionDevice::DataDevice(_) | SelectionDevice::Primary(_)
+                        )
+                    })
+                    .cloned(),
+            );
+        }
+        devices
     }
 
     /// Change focus for the clipboard selection to `new_focus` client. Providing `None` will
@@ -133,6 +172,7 @@ impl<U: Clone + Send + Sync + 'static> SeatData<U> {
     ) where
         D: SelectionHandler<SelectionUserData = U> + 'static,
     {
+        let devices = self.devices();
         let (client, selection) = match ty {
             SelectionTarget::Primary => (self.primary_selection_focus.as_ref(), &mut self.primary_selection),
             SelectionTarget::Clipboard => (
@@ -157,8 +197,7 @@ impl<U: Clone + Send + Sync + 'static> SeatData<U> {
             restrict_to = None;
         }
 
-        for device in self
-            .known_devices
+        for device in devices
             .iter()
             .filter(|&device| restrict_to.is_none() || restrict_to == Some(device))
             .filter(|&device| match device {
@@ -236,7 +275,8 @@ impl<U: Clone + Send + Sync + 'static> SeatData<U> {
 impl<U: Clone + Send + Sync + 'static> Default for SeatData<U> {
     fn default() -> Self {
         Self {
-            known_devices: Vec::new(),
+            known_devices: Rc::new(RefCell::new(Vec::new())),
+            borrowed_devices: None,
             clipboard_selection: None,
             clipboard_selection_focus: None,
             primary_selection: None,

@@ -52,19 +52,20 @@ where
 
         match request {
             primary_device::Request::SetSelection { source, .. } => {
-                let seat_data = match seat.get_keyboard() {
-                    Some(keyboard) if keyboard.client_of_object_has_focus(&resource.id()) => seat
-                        .user_data()
-                        .get::<RefCell<SeatData<D::SelectionUserData>>>()
-                        .unwrap(),
-                    _ => {
-                        debug!(
-                            client = ?client,
-                            "denying setting selection by a non-focused client"
-                        );
-                        return;
-                    }
+                // The owner's keyboard, or a seat that borrows this device,
+                // must focus the client.
+                let Some(seat) = crate::wayland::selection::seat_setting_a_selection(&seat, &resource.id())
+                else {
+                    debug!(
+                        client = ?client,
+                        "denying setting selection by a non-focused client"
+                    );
+                    return;
                 };
+                let seat_data = seat
+                    .user_data()
+                    .get::<RefCell<SeatData<D::SelectionUserData>>>()
+                    .unwrap();
 
                 let source = source.map(SelectionSourceProvider::Primary);
 
